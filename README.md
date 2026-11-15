@@ -1,218 +1,220 @@
-# 🍺 Breweries Medallion Architecture — Databricks Notebooks
-[![Databricks](https://img.shields.io/badge/Databricks-%20Notebook-blue)](https://www.databricks.com/)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-green)](https://www.python.org/)
-[![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.0-orange)](https://delta.io/)
+# Open Source Analytics Lakehouse — Databricks
+
+[![Databricks](https://img.shields.io/badge/Databricks-Serverless-orange)](https://www.databricks.com/)
+[![Python](https://img.shields.io/badge/Python-3.12-blue)](https://www.python.org/)
+[![Delta Lake](https://img.shields.io/badge/Delta%20Lake-Delta%20Tables-00ADD8)](https://delta.io/)
+[![GitLab](https://img.shields.io/badge/GitLab-Version%20Control-FC6D26)](https://gitlab.com/)
 
 ## 🎯 Overview
 
-End-to-end data pipeline on Databricks implementing the **Medallion Architecture** (Bronze → Silver → Gold) using real data from the [Open Brewery DB API](https://www.openbrewerydb.org/), with change simulation and historical tracking via **SCD Type 2**.
+An end-to-end **Data Engineering** project built with **Databricks, PySpark, Delta Lake and Unity Catalog**, following the **Medallion Architecture (Bronze → Silver → Gold)**.
 
----
+The pipeline ingests public repository metadata from the [GitHub REST API](https://docs.github.com/en/rest/repos/repos#list-organization-repositories), captures full repository snapshots, detects changes between acquisitions and maintains repository history through a **manually implemented Slowly Changing Dimension Type 2 (SCD2)** using Delta Lake `MERGE`.
+
+Repository activity metrics (**stars and forks**) are stored separately as historical snapshots, so metric fluctuations do not create unnecessary SCD2 versions.
+
+**Current status:** The pipeline has been tested with two real snapshots of the `databricks` GitHub organization. Job orchestration, Terraform provisioning and Jenkins CI/CD are planned enhancements, not yet implemented.
 
 ## 📁 Project Structure
-notebooks/
 
-├── 01_BronzeIngestion.ipynb
-
-├── 02_SilverLightStaging.ipynb
-
-├── 03_CreationRandomicData.ipynb
-
-├── 04_SilverCleaning.ipynb
-
-└── 05_GoldModeling.ipynb
-
----
+```text
+open-source-analytics-lakehouse/
+├── notebooks/
+│   ├── 01_BronzeIngestion.ipynb
+│   ├── 02_SilverLightStaging.ipynb
+│   ├── 03_ChangeDetection.ipynb
+│   ├── 04_SilverCleaning.ipynb
+│   └── 05_GoldModeling.ipynb
+├── databricks.yml
+├── pyproject.toml
+├── uv.lock
+├── .gitignore
+└── README.md
+```
 
 ## 🏗️ Architecture
-![Notbeook_Medallion_Architecture_Breweries.png](./Notbeook_Medallion_Architecture_Breweries.png "Notbeook_Medallion_Architecture_Breweries.png")
 
----
+```text
+GitHub REST API (public organization repositories)
+                    |
+                    v
+01 — Bronze Ingestion
+     Full API pagination; append-only snapshots
+     snapshot_id + ingestion_ts + raw_json
+                    |
+           +--------+--------------------+
+           |                             |
+           v                             v
+02 — Silver Light Staging       03 — Change Detection
+     Latest snapshot only            Compare last two Bronze snapshots
+                                    NEW / UPDATED / UNCHANGED
+                                          |
+                                          v
+                                04 — Silver Cleaning
+                                     Data quality checks
+                                     Incremental NEW / UPDATED records
+                                          |
+                                          v
+                                05 — Gold Repository Dimension
+                                     Manual Delta MERGE / SCD Type 2
+
+Bronze snapshots ----------------> 05 — Gold Repository Metrics
+                                     Stars and forks by snapshot
+                                     Window + lag() for metric deltas
+```
+
+The staging notebook prepares the latest snapshot; the change-detection notebook currently compares the two most recent **Bronze** snapshots directly.
 
 ## 📋 Delta Tables — Unity Catalog
 
-| Table | Layer | Description |
-|---|---|---|
-| `workspace.notebook_breweries.bronze_breweries` | Bronze | Raw API data, incremental append per page |
-| `workspace.notebook_breweries.silver_staging_breweries` | Silver | Full snapshot + simulated changes, includes `ingestion_ts` |
-| `workspace.notebook_breweries.silver_breweries` | Silver | Cleaned and validated data, US only with non-null `address_1` |
-| `workspace.notebook_breweries.gold_breweries` | Gold | SCD Type 2 with `brewery_sk`, `valid_from`, `valid_to`, `current` |
-| `workspace.notebook_breweries.gold_table_breweries_by_state` | Gold | Aggregation: active brewery count per US state |
+All tables use the `github_analytics` schema in the selected catalog (`opensource_dev`, `opensource_staging` or `opensource_prod`). The current tested environment is **DEV**.
 
----
+| Table (DEV) | Layer | Description |
+|---|---|---|
+| `opensource_dev.github_analytics.bronze_github_repositories` | Bronze | Append-only GitHub API snapshots, including `raw_json`, `snapshot_id` and `ingestion_ts` |
+| `opensource_dev.github_analytics.silver_staging_github_repositories` | Silver | Latest snapshot; overwritten on each staging run |
+| `opensource_dev.github_analytics.silver_changes_github_repositories` | Silver | `NEW` and `UPDATED` repositories from change detection |
+| `opensource_dev.github_analytics.silver_github_repositories` | Silver | Cleaned, validated incremental changes |
+| `opensource_dev.github_analytics.gold_github_repositories` | Gold | Repository dimension with SCD Type 2 history |
+| `opensource_dev.github_analytics.gold_github_repository_metrics` | Gold | Historical star and fork counts per repository and snapshot |
 
 ## 🔍 Notebook Details
 
 ### 01 — Bronze Ingestion
 
-Performs a **paginated** call to the Open Brewery DB API and appends results to the bronze table.
+- Calls the GitHub REST API for public repositories belonging to a configurable organization (default: `databricks`).
+- Follows GitHub's `Link: rel="next"` pagination until every available page has been retrieved (up to 100 repositories per page).
+- Uses a defined PySpark `StructType` rather than schema inference.
+- Assigns a unique `snapshot_id` and a shared UTC `ingestion_ts` to each acquisition.
+- Preserves the original API response in `raw_json`.
+- Writes data to a managed Delta table in **append** mode, retaining earlier snapshots.
 
-**Pagination logic:**
-```python
-per_page = 10
-total_existing = spark.table("bronze_breweries").count()  # 0 if table doesn't exist
-current_page = (total_existing // per_page) + 1
-```
-
-- Each run fetches exactly one page of 10 records
-- The page number is computed dynamically based on existing record count
-- Write mode is **append** — raw data is never overwritten
-- Maximum supported records per page by the API is 200
-
-**Output:** `bronze_breweries` — 10 new records appended per run
-
----
+**Output:** `bronze_github_repositories`.
 
 ### 02 — Silver Light Staging
 
-Transforms bronze data into a clean snapshot, adding an ingestion timestamp for SCD2 tracking.
+- Selects the most recent Bronze snapshot for the configured organization, using `ingestion_ts`.
+- Retains relevant repository attributes and the original snapshot metadata.
+- Excludes `raw_json` from the staging projection.
+- Writes the current snapshot using **overwrite** mode.
 
-**Transformations:**
-- Selection of relevant columns (drops unnecessary fields)
-- Adds `ingestion_ts = current_timestamp()` — used as `sequence_by` for SCD2
-- Write mode: **overwrite** with `overwriteSchema = True`
+**Output:** `silver_staging_github_repositories`.
 
-**Output:** `silver_staging_breweries` — full snapshot refreshed on every run
+### 03 — Change Detection
 
----
+- Compares the two most recent Bronze snapshots using the repository `id`.
+- Classifies records as `NEW`, `UPDATED` or `UNCHANGED`.
+- Uses null-safe comparisons (`eqNullSafe`) on the tracked fields: `name`, `full_name`, `description`, `language`, `archived` and `default_branch`.
+- Excludes stars and forks from descriptive SCD2 change detection.
+- Writes only `NEW` and `UPDATED` records to the change table.
+- Treats every repository as `NEW` when only the initial snapshot is available.
 
-### 03 — Creation Randomic Data
-
-Simulates realistic brewery changes to test the downstream SCD2 logic.
-
-**Logic:**
-- Randomly selects between 3 and 10 breweries from the silver staging table
-- For each brewery, randomly modifies one of: `phone`, `street`, or `name`
-- Assigns a new `ingestion_ts` to signal the change to the SCD2 layer
-- Modified records are **appended** to `silver_staging_breweries`
-
-**Fake data generators:**
-| Field | Examples |
-|---|---|
-| `phone` | `+1-500-XXXXXXX`, `+39-081-XXXXXXX` |
-| `street` | `42 Oak Ave`, `17 Brewery Ln` |
-| `name` | `[FirstWord] Craft Beer`, `[...] Taproom` |
-
-**Output:** N modified rows appended to `silver_staging_breweries`
-
----
+**Output:** `silver_changes_github_repositories`. This is snapshot-difference detection, **not** GitHub-native CDC.
 
 ### 04 — Silver Cleaning
 
-Applies data quality rules and incremental deduplication to populate the clean silver table.
+- Normalizes selected text attributes with `trim()` while preserving meaningful `NULL` values.
+- Validates mandatory fields and checks for duplicate repository IDs within a snapshot.
+- Loads new and updated records incrementally with a `left_anti` join on `id` and `snapshot_id`.
+- Preserves previously loaded Silver rows when a subsequent snapshot has no descriptive changes.
 
-**Filters applied:**
-- `country = 'United States'`
-- `address_1 IS NOT NULL`
-
-**Transformations:**
-| Field | Rule |
-|---|---|
-| `address_2`, `address_3` | Null → `"Doesn't exist"` |
-| `name` | Removes `Â` character (encoding artifact) |
-| `phone` | Strips international prefix + keeps digits only |
-| `postal_code` | For US: removes ZIP+4 suffix (e.g. `12345-6789` → `12345`) |
-
-**Incremental logic:**
-```python
-# Inserts only records not already present in silver (anti-join on id + ingestion_ts)
-new_records = cleaned_df.join(existing_df, on=["id", "ingestion_ts"], how="left_anti")
-```
-
-**Output:** `silver_breweries` — only new records appended, no duplicates
-
----
+**Output:** `silver_github_repositories`.
 
 ### 05 — Gold Modeling
 
-Implements **Slow Changing Dimension Type 2** manually via Delta `merge()` and produces analytical aggregations.
+**Repository dimension — manual SCD Type 2**
 
-#### Gold Schema
+- Creates a deterministic `repository_sk` using `SHA256(id + "_" + snapshot_id)`.
+- Tracks `valid_from`, `valid_to` and `current` for each descriptive version.
+- Compares incoming attributes to the current Gold version using null-safe conditions.
+- Stages changed records twice: once with their merge key to close the old version, and once with a `NULL` merge key to insert the new version.
+- Applies `whenMatchedUpdate()` and `whenNotMatchedInsert()` in a Delta Lake `MERGE`.
+- Verifies mandatory fields, surrogate-key uniqueness, current-version uniqueness and valid temporal intervals.
 
-| Column | Type | Description |
-|---|---|---|
-| `brewery_sk` | string | Surrogate key: `SHA256(id + "_" + ingestion_ts)` |
-| `id` | string | Business key from the API |
-| `name`, `brewery_type`, ... | string | Brewery attributes |
-| `valid_from` | timestamp | Record validity start |
-| `valid_to` | timestamp | Record validity end (`NULL` if current) |
-| `current` | boolean | `True` only for the active version |
+**Repository metrics — snapshot history**
 
-#### Manual SCD2 Logic (3 steps)
-Step 1 — Source deduplication
-silver_dedup = latest version per ID (Window + row_number DESC on ingestion_ts)
+- Stores `stargazers_count` and `forks_count` from **Bronze**, independently of the SCD2 dimension.
+- Uses the logical key `organization`, `id`, `snapshot_id` to avoid repeated inserts in sequential runs.
+- Calculates changes between consecutive snapshots with Spark window functions and `lag()`.
+- Checks mandatory fields, duplicate keys, negative metric counts and consistency between `snapshot_date` and `ingestion_ts`.
 
-Step 2 — Change detection
-change_df = join source ⟕ target (current=true) WHERE fields differ (null-safe <=>)
+**Outputs:** `gold_github_repositories` and `gold_github_repository_metrics`.
 
-Step 3 — Staged DataFrame + Merge
-staged_df = silver_dedup (merge_id = id)
-UNION change_df (merge_id = NULL → forces INSERT)
+## 🧪 Validation and Observed Results
 
-MERGE ON target.id = source.merge_id AND target.current = true
-WHEN MATCHED AND changed → UPDATE valid_to = ingestion_ts, current = False
-WHEN NOT MATCHED → INSERT new record (valid_from = ingestion_ts, current = True)
+The initial validation used two real GitHub API snapshots for the `databricks` organization:
 
-text
+| Ingestion date | Repository records |
+|---|---:|
+| 2026-11-14 | 253 |
+| 2026-11-15 | 253 |
 
-> **Note:** `brewery_sk` is generated as `SHA256(id + "_" + ingestion_ts)` to guarantee determinism and idempotency across re-runs. Using `uuid()` was intentionally avoided, as it would generate a different surrogate key for the same record on every execution.
+Observed results during testing:
 
-#### Aggregations
+- **Bronze:** 506 rows across two distinct snapshots.
+- **Change Detection:** all 253 repositories in the second snapshot were `UNCHANGED` for the tracked descriptive fields.
+- **Gold SCD2:** 253 current repository versions, with no multiple-current-version anomalies.
+- **Example metric change:** `databricks/app-templates` increased from **221 to 222 stars**, while forks remained at **166**.
+- **Metric history:** both snapshots are retained independently of descriptive SCD2 changes.
 
-- **`gold_table_breweries_by_state`** — Count of active breweries (`current = true`) grouped by US state, ordered by count descending
-- Final column ordering in `gold_breweries` is enforced with `brewery_sk` as the first column for readability
+The no-change SCD2 path has been exercised. A real descriptive `UPDATED` event and the handling of repositories absent from a later snapshot remain to be tested/implemented.
 
----
-
-## ⚙️ Setup
+## ⚙️ Setup and Execution
 
 ### Prerequisites
-- Databricks Runtime with Delta Lake
-- Unity Catalog enabled
-- Catalog: `workspace`, Schema: `notebook_breweries`
 
-### Initial Setup
-```sql
--- Create schema if it doesn't exist
-CREATE SCHEMA IF NOT EXISTS workspace.notebook_breweries;
+- Python **3.12** and [`uv`](https://docs.astral.sh/uv/).
+- Access to a Databricks workspace with **Serverless compute** and **Unity Catalog**.
+- Databricks authentication configured for the local development environment.
+- The target catalog and `github_analytics` schema already created in Unity Catalog.
+
+### Local development
+
+Install the dependencies declared in `pyproject.toml`:
+
+```powershell
+uv sync
 ```
 
-### Execution Order
-01 → 02 → 03 → 04 → 05
+The project uses **Databricks Connect** to run PySpark from VS Code against remote Databricks compute. When running locally, initialize the session with:
 
-> Notebooks **01** and **03** can be run multiple times to simulate new ingestions and field changes. The downstream layers (04, 05) will handle new data incrementally.
-
----
-
-## 🧪 SCD2 Validation
-
-Validation queries included (under `%skip`) in `02_SilverLightStaging` and `05_GoldModeling`:
-
-```sql
--- Full history for a specific brewery
-SELECT id, name, street, valid_from, valid_to, current
-FROM gold_breweries
-WHERE id = '4dcaeaa3-d7cc-4016-9392-5bde4e3a8f4d'
-ORDER BY valid_from;
-
--- IDs with more than one current=true row (anomaly check)
-SELECT id FROM gold_breweries
-GROUP BY id
-HAVING COUNT_IF(current = true) > 1;
-
--- Records with valid_to < valid_from (temporal inconsistency)
-SELECT * FROM gold_breweries
-WHERE valid_to IS NOT NULL AND valid_to < valid_from;
+```python
+from databricks.connect import DatabricksSession
+spark = DatabricksSession.builder.serverless().getOrCreate()
 ```
 
----
+Notebook parameters include `environment` (`dev`, `staging`, `prod`) and `organization` (default: `databricks`). For local execution, the notebooks can read `LAKEHOUSE_ENV` and `GITHUB_ORGANIZATION` environment variables. The matching Unity Catalog catalogs must exist.
+
+### Execution order
+
+```text
+01_BronzeIngestion
+    → 02_SilverLightStaging
+    → 03_ChangeDetection
+    → 04_SilverCleaning
+    → 05_GoldModeling
+```
+
+The current bundle file (`databricks.yml`) configures the **DEV target** for Databricks development and synchronization. It does not yet define an automated multi-task Job.
+
+To validate the configuration:
+
+```powershell
+databricks bundle validate -t dev
+```
+
+## 🚧 Roadmap
+
+- Test a real descriptive update and validate the full SCD2 version-closing/insertion path.
+- Add explicit handling for removed or inaccessible repositories.
+- Improve retry, API rate-limit handling, snapshot completeness and concurrent-run idempotency.
+- Define Databricks Jobs with Declarative Automation Bundles.
+- Add Terraform infrastructure provisioning and Jenkins CI/CD from GitLab.
+- Extend end-to-end data quality reporting and analytical outputs.
 
 ## 🛠️ Tech Stack
 
-- **Databricks** (Runtime + Unity Catalog)
-- **PySpark** / **Delta Lake**
-- **Python** (`requests`, `random`, `datetime`)
-- **Open Brewery DB API** — `https://api.openbrewerydb.org/v1/breweries`
+**Databricks**, **PySpark**, **Delta Lake**, **Unity Catalog**, **Databricks Connect**, **Python**, **requests**, **GitHub REST API**, **uv** and **GitLab**.
 
 ## 👨‍💻 Author
 

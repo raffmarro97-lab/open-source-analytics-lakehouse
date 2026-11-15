@@ -1,0 +1,21 @@
+# Python virtual environments
+.venv/
+.venv_backup/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Databricks local files
+.databricks/
+
+# VS Code local settings
+.vscode/
+
+# Generated Python type definitions
+typings/
