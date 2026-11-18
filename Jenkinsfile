@@ -15,6 +15,11 @@ pipeline {
             defaultValue: false,
             description: 'Deploy Databricks Asset Bundle to DEV'
         )
+        booleanParam(
+            name: 'RUN_DEV',
+            defaultValue: false,
+            description: 'Execute Databricks Job in DEV after deployment'
+        )
     }
 
     stages {
@@ -199,6 +204,39 @@ pipeline {
                             databricks bundle deploy -t dev
 
                             echo "DEV deployment completed!"
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Run Databricks DEV') {
+            when {
+                allOf {
+                    expression { params.DEPLOY_DEV == true }
+                    expression { params.RUN_DEV == true }
+                }
+            }
+
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'DATABRICKS_AUTH_TYPE=pat'
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            echo "Running Databricks Job in DEV..."
+
+                            databricks bundle run -t dev github_analytics_pipeline
+
+                            echo "DEV Job execution completed!"
                         '''
                     }
                 }
