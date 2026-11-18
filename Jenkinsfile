@@ -8,6 +8,14 @@ pipeline {
         skipDefaultCheckout(true)
         timestamps()
     }
+ 
+    parameters {
+        booleanParam(
+            name: 'DEPLOY_DEV',
+            defaultValue: false,
+            description: 'Deploy Databricks Asset Bundle to DEV'
+        )
+    }
 
     stages {
         stage('Checkout') {
