@@ -139,6 +139,32 @@ pipeline {
             }
         }
 
+        stage('Databricks Bundle Validate') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'DATABRICKS_AUTH_TYPE=pat'
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            echo "Validating Databricks Asset Bundle - DEV..."
+
+                            databricks bundle validate -t dev
+
+                            echo "Databricks Bundle DEV validation successful!"
+                        '''
+                    }
+                }
+            }
+        }
+    
     }
 
     post {
