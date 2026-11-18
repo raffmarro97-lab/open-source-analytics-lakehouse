@@ -1,6 +1,8 @@
 
 pipeline {
-    agent any
+    agent any{
+        label 'lakehouse'
+    }
 
     options {
         skipDefaultCheckout(true)
@@ -30,6 +32,21 @@ pipeline {
                     echo "Repository verification successful!"
                 '''
             }
+        }
+    }
+
+    stage('Verify CI Tools') {
+        steps {
+            sh '''
+                echo "Checking Terraform..."
+                terraform version
+
+                echo "Checking Databricks CLI..."
+                databricks version
+
+                echo "Checking Git..."
+                git --version
+            '''
         }
     }
 
