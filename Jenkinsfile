@@ -57,14 +57,6 @@ pipeline {
             }
         }
 
-        stage('Terraform Init') {
-            steps {
-                sh '''
-                    terraform -chdir=terraform init -backend=false -input=false
-                '''
-            }
-        }
-
         stage('Terraform Validate') {
             steps {
                 sh '''
