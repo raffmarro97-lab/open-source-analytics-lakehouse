@@ -1,3 +1,1 @@
-provider "databricks" {
-  profile = "raff"
-}
+provider "databricks" {}

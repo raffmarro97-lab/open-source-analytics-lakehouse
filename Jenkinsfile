@@ -106,6 +106,47 @@ pipeline {
             }
         }
 
+        stage('Terraform Plan') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'gitlab-terraform-state-token',
+                        variable: 'TF_HTTP_PASSWORD'
+                    ),
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'TF_HTTP_USERNAME=raffmarro97',
+                        'TF_HTTP_ADDRESS=https://gitlab.com/api/v4/projects/88900594/terraform/state/github-analytics-infra-dev',
+                        'TF_HTTP_LOCK_METHOD=POST',
+                        'TF_HTTP_UNLOCK_METHOD=DELETE'
+                    ]) {
+                        sh '''
+                            set +x
+                            set -eu
+
+                            export TF_HTTP_LOCK_ADDRESS="${TF_HTTP_ADDRESS}/lock"
+                            export TF_HTTP_UNLOCK_ADDRESS="${TF_HTTP_ADDRESS}/lock"
+
+                            terraform -chdir=terraform init \
+                                -reconfigure \
+                                -lockfile=readonly \
+                                -input=false \
+                                -no-color
+
+                            terraform -chdir=terraform plan \
+                                -input=false \
+                                -no-color
+                        '''
+                    }
+                }
+            }
+        }
+
     }
 
     post {
