@@ -48,8 +48,33 @@ pipeline {
                 '''
             }
         }
+
+        stage('Terraform Format') {
+            steps {
+                sh '''
+                    terraform -chdir=terraform fmt -check -recursive
+                '''
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                sh '''
+                    terraform -chdir=terraform init -backend=false -input=false
+                '''
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                sh '''
+                    terraform -chdir=terraform validate -no-color
+                '''
+            }
+        }
+
     }
-    
+
     post {
         success {
             echo 'Jenkins pipeline completed successfully!'
