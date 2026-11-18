@@ -73,6 +73,39 @@ pipeline {
             }
         }
 
+        stage('Terraform Remote State') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'gitlab-terraform-state-token',
+                        variable: 'TF_HTTP_PASSWORD'
+                    )
+                ]) {
+                    withEnv([
+                        'TF_HTTP_USERNAME=raffmarro97',
+                        'TF_HTTP_ADDRESS=https://gitlab.com/api/v4/projects/88900594/terraform/state/github-analytics-infra-dev',
+                        'TF_HTTP_LOCK_METHOD=POST',
+                        'TF_HTTP_UNLOCK_METHOD=DELETE'
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            export TF_HTTP_LOCK_ADDRESS="${TF_HTTP_ADDRESS}/lock"
+                            export TF_HTTP_UNLOCK_ADDRESS="${TF_HTTP_ADDRESS}/lock"
+
+                            echo "Initializing GitLab remote backend..."
+
+                            terraform -chdir=terraform init -reconfigure -lockfile=readonly -input=false -no-color
+
+                            echo "Reading Terraform remote state..."
+
+                            terraform -chdir=terraform state list
+                        '''
+                    }
+                }
+            }
+        }
+
     }
 
     post {
