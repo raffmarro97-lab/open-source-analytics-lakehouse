@@ -5,13 +5,39 @@
 bundle:
   name: open-source-analytics-lakehouse
 
+include:
+  - resources/*.yml
+
 targets:
   dev:
     mode: development
     default: true
     workspace:
       host: https://dbc-ffab9e1e-aa5d.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/ProjectOpenSourceAnalytics/${bundle.target}
+  
+  staging:
+    presets: 
+      name_prefix: "[staging raffmarro97] "
+    workspace:
+      host: https://dbc-ffab9e1e-aa5d.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/ProjectOpenSourceAnalytics/${bundle.target}
 
+  prod:
+    mode: production
+    presets: 
+      name_prefix: "[prod raffmarro97] "
+      
+    run_as:
+      user_name: raffmarro97@gmail.com
+
+    permissions:
+      - user_name: raffmarro97@gmail.com
+        level: CAN_MANAGE
+        
+    workspace:
+      host: https://dbc-ffab9e1e-aa5d.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/ProjectOpenSourceAnalytics/${bundle.target}
   ## Optionally, there could be 'staging' or 'prod' targets here.
   #
   # prod:
