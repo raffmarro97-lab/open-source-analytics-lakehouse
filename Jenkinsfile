@@ -154,11 +154,13 @@ pipeline {
                         sh '''
                             set -eu
 
-                            echo "Validating Databricks Asset Bundle - DEV..."
+                            for target in dev staging prod; do
+                                echo "Validating Databricks Bundle: $target"
 
-                            databricks bundle validate -t dev
+                                databricks bundle validate -t "$target"
 
-                            echo "Databricks Bundle DEV validation successful!"
+                                echo "Validation successful: $target"
+                            done
                         '''
                     }
                 }
