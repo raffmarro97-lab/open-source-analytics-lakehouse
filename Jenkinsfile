@@ -174,7 +174,37 @@ pipeline {
                 }
             }
         }
-    
+
+        stage('Deploy Databricks DEV') {
+            when {
+                expression { params.DEPLOY_DEV == true }
+            }
+
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'DATABRICKS_AUTH_TYPE=pat'
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            echo "Deploying Databricks Bundle to DEV..."
+
+                            databricks bundle deploy -t dev
+
+                            echo "DEV deployment completed!"
+                        '''
+                    }
+                }
+            }
+        }
+
     }
 
     post {
