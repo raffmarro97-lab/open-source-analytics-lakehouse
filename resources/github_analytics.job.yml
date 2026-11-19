@@ -49,3 +49,10 @@ resources:
             - task_key: silver_cleaning
           notebook_task:
             notebook_path: ../notebooks/05_GoldModeling.ipynb
+
+        # Step 6: Validate data quality across Medallion layers
+        - task_key: data_quality_checks
+          depends_on:
+            - task_key: gold_modeling
+          notebook_task:
+            notebook_path: ../notebooks/06_DataQualityChecks.ipynb
