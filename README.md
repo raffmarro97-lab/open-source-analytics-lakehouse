@@ -1,295 +1,229 @@
-# Open Source Analytics Lakehouse — Databricks
+# Open Source Analytics Lakehouse
 
-[![Databricks](https://img.shields.io/badge/Databricks-Serverless-orange)](https://www.databricks.com/)
-[![Python](https://img.shields.io/badge/Python-3.12-blue)](https://www.python.org/)
-[![Delta Lake](https://img.shields.io/badge/Delta%20Lake-Delta%20Tables-00ADD8)](https://delta.io/)
-[![GitLab](https://img.shields.io/badge/GitLab-Version%20Control-FC6D26)](https://gitlab.com/)
+[![Databricks](https://img.shields.io/badge/Databricks-Serverless-FF3621?logo=databricks&logoColor=white)](https://www.databricks.com/)
+[![Apache Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0-E25A1C?logo=apachespark&logoColor=white)](https://spark.apache.org/)
+[![Delta Lake](https://img.shields.io/badge/Delta%20Lake-Lakehouse-00ADD8)](https://delta.io/)
+[![Terraform](https://img.shields.io/badge/Terraform-IaC-844FBA?logo=terraform&logoColor=white)](https://developer.hashicorp.com/terraform)
+[![Jenkins](https://img.shields.io/badge/Jenkins-CI%2FCD-D24939?logo=jenkins&logoColor=white)](https://www.jenkins.io/)
 
-## 🎯 Overview
+An end-to-end **Data Engineering portfolio project** that ingests public GitHub repository metadata and builds a historical analytics lakehouse on **Databricks, PySpark, Delta Lake and Unity Catalog**.
 
-An end-to-end **Data Engineering** project built with **Databricks, PySpark, Delta Lake and Unity Catalog**, following the **Medallion Architecture (Bronze → Silver → Gold)**.
+It demonstrates **Medallion Architecture**, snapshot-based change detection, **Slowly Changing Dimension Type 2 (SCD2)**, automated data quality checks, **Terraform Infrastructure as Code**, **Databricks Asset Bundles**, and a **Jenkins CI/CD pipeline** running inside Docker.
 
-The pipeline ingests public repository metadata from the [GitHub REST API](https://docs.github.com/en/rest/repos/repos#list-organization-repositories), captures append-only snapshots, detects descriptive changes between acquisitions and maintains repository history through a **manually implemented Slowly Changing Dimension Type 2 (SCD2)** using Delta Lake `MERGE`.
+## Architecture
 
-Repository metrics (**stars and forks**) are historized independently of descriptive attributes, so changes in metric counts do not create unnecessary SCD2 dimension versions.
-
-The pipeline is **orchestrated as a five-task Databricks Job** and deployed using **Databricks Declarative Automation Bundles (DABs)**. Separate **DEV, STAGING and PROD** targets use distinct Unity Catalog catalogs and workspace deployment paths.
-
-**Project status — 18 November 2026:** DEV end-to-end execution and snapshot consistency checks passed; STAGING was initialized and validated; the PROD bundle target and Job were deployed. A controlled synthetic `UPDATED` scenario confirmed SCD2 version closing and insertion, and a repeated-input comparison detected no further changes. **GitLab CI/CD is planned but not yet implemented.** The initial PROD data run has not been documented in these results.
-
-## 📁 Project Structure
-
-```text
-open-source-analytics-lakehouse/
-├── notebooks/
-│   ├── 01_BronzeIngestion.ipynb
-│   ├── 02_SilverLightStaging.ipynb
-│   ├── 03_ChangeDetection.ipynb
-│   ├── 04_SilverCleaning.ipynb
-│   └── 05_GoldModeling.ipynb
-├── resources/
-│   └── github_analytics.job.yml
-├── databricks.yml
-├── pyproject.toml
-├── uv.lock
-├── .gitignore
-└── README.md
+```mermaid
+flowchart TD
+    API[GitHub REST API] --> B[01 · Bronze Ingestion<br/>Append-only snapshots]
+    B --> S[02 · Silver Light Staging<br/>Latest snapshot]
+    B --> C[03 · Change Detection<br/>Compare last two snapshots]
+    C --> SC[04 · Silver Cleaning<br/>Incremental records]
+    SC --> G[05 · Gold Repositories<br/>SCD Type 2]
+    B --> M[05 · Gold Metrics<br/>Stars and forks history]
+    S --> DQ[06 · Data Quality Checks]
+    G --> DQ
+    M --> DQ
 ```
 
-The bundle includes `resources/*.yml`, where `github_analytics.job.yml` defines the multi-task Job. The SCD2 simulation was executed in a separate Databricks test notebook, not as an additional production pipeline task.
+> Tasks run sequentially in the Databricks Job. Change Detection compares the latest two **Bronze** snapshots directly; Gold Metrics also reads Bronze. The diagram emphasizes data dependencies rather than task order.
 
-## 🏗️ Architecture
+### Medallion tables
+
+| Layer | Table | Purpose |
+|---|---|---|
+| Bronze | `bronze_github_repositories` | Append-only API snapshots, raw JSON and ingestion metadata |
+| Silver | `silver_staging_github_repositories` | Latest snapshot for an organization |
+| Silver | `silver_changes_github_repositories` | New and descriptively updated repositories |
+| Silver | `silver_github_repositories` | Cleaned incremental repository records |
+| Gold | `gold_github_repositories` | Historical repository dimension using SCD Type 2 |
+| Gold | `gold_github_repository_metrics` | Per-snapshot stars/forks metrics and trends |
+
+The source is the [GitHub REST API](https://docs.github.com/en/rest/repos/repos#list-organization-repositories). The default organization is `databricks`, configurable through a Job parameter.
+
+## Change Detection
+
+The workflow selects the latest two Bronze snapshots for an organization and joins repositories by GitHub `id`.
+
+Six descriptive attributes are tracked with null-safe comparison (`eqNullSafe`): `name`, `full_name`, `description`, `language`, `archived` and `default_branch`.
+
+- **`NEW`** — repository absent from the previous snapshot.
+- **`UPDATED`** — one or more monitored attributes changed.
+- **`UNCHANGED`** — no monitored attribute changed.
+- **Initial load** — with no previous snapshot, all repositories are `NEW`.
+
+Only `NEW` and `UPDATED` rows are written to `silver_changes_github_repositories`. Star and fork count changes do **not** generate descriptive updates: those metrics are historized independently.
+
+This is **snapshot-difference detection**, not event-based GitHub CDC. Repository deletion detection is not yet implemented.
+
+## Gold: SCD Type 2 and metric history
+
+The Gold repository dimension preserves descriptive changes using Delta Lake `MERGE`:
+
+- Deterministic surrogate key (`repository_sk`) derived from repository and snapshot identifiers.
+- Temporal columns `valid_from`, `valid_to` and `current`.
+- Existing active versions close when monitored attributes change, and new active versions are inserted.
+- A `merge_id` staging pattern supports closing existing versions and inserting new versions.
+- Reprocessing the same descriptive data should not create additional SCD2 versions.
+
+Gold Metrics stores observations per `(organization, id, snapshot_id)` and uses Spark window operations for star/fork trends, without producing unnecessary SCD2 dimension changes.
+
+## Databricks Job and environments
+
+`resources/github_analytics.job.yml` defines `github_analytics_pipeline`, a six-task Job with explicit dependencies:
 
 ```text
-GitHub REST API — public organization repositories
-                       |
-                       v
-             01 — Bronze Ingestion
-             API pagination; append-only Delta snapshots
-             snapshot_id + ingestion_ts + raw_json
-                       |
-             +---------+--------------------------+
-             |                                    |
-             v                                    v
-  02 — Silver Light Staging           03 — Change Detection
-  Latest snapshot only                 Compare latest two Bronze snapshots
-  Overwrite on each run                NEW / UPDATED / UNCHANGED
-                                                 |
-                                                 v
-                                     04 — Silver Cleaning
-                                     Validations + incremental loading
-                                                 |
-                                                 v
-                                     05 — Gold Repository Dimension
-                                     Manual SCD Type 2 Delta MERGE
-
-  Bronze snapshots -----------------> 05 — Gold Repository Metrics
-                                      Stars / forks by snapshot
-                                      Window + lag() for trend analysis
+bronze_ingestion
+    ↓
+silver_staging
+    ↓
+change_detection
+    ↓
+silver_cleaning
+    ↓
+gold_modeling
+    ↓
+data_quality_checks
 ```
 
-**Execution order:** `bronze_ingestion` → `silver_staging` → `change_detection` → `silver_cleaning` → `gold_modeling`.
+The Job receives `environment` and `organization` parameters and is configured with `max_concurrent_runs: 1`.
 
-> **Implementation detail:** The Job runs sequentially, but `03_ChangeDetection` compares the latest two **Bronze** snapshots directly; it does not read Silver Staging. Gold Metrics also reads Bronze directly.
->
-> This is **snapshot-difference detection**, not GitHub-native change-data capture (CDC). The current implementation detects `NEW` and `UPDATED` repositories; it does not yet process repositories missing from a later snapshot as `DELETED`.
-
-## 📋 Delta Tables — Unity Catalog
-
-Each environment uses the same schema, `github_analytics`, in a separate catalog.
-
-| Environment | Unity Catalog catalog | Role |
+| Target | Unity Catalog catalog | Bundle path suffix |
 |---|---|---|
-| DEV | `opensource_dev` | Development and functional testing |
-| STAGING | `opensource_staging` | Pre-production validation |
-| PROD | `opensource_prod` | Production target |
+| `dev` | `opensource_dev` | `ProjectOpenSourceAnalytics/dev` |
+| `staging` | `opensource_staging` | `ProjectOpenSourceAnalytics/staging` |
+| `prod` | `opensource_prod` | `ProjectOpenSourceAnalytics/prod` |
 
-The following six tables are created under `<catalog>.github_analytics`:
+Each catalog uses the `github_analytics` schema. These are **logically isolated environments within one Databricks workspace**, not three separate workspaces.
 
-| Table | Layer | Purpose |
-|---|---|---|
-| `bronze_github_repositories` | Bronze | Append-only API snapshots with raw JSON and ingestion metadata |
-| `silver_staging_github_repositories` | Silver | Most recent snapshot; overwritten each run |
-| `silver_changes_github_repositories` | Silver | Latest detected `NEW` / `UPDATED` records |
-| `silver_github_repositories` | Silver | Cleaned and validated incremental records |
-| `gold_github_repositories` | Gold | SCD2 repository dimension and version history |
-| `gold_github_repository_metrics` | Gold | Stars and forks for each repository and snapshot |
+### Data quality
 
-The environments currently share **one Databricks workspace**, with logical separation through catalogs, bundle paths and Jobs; they are not isolated by separate workspaces.
+The final notebook, `06_DataQualityChecks.ipynb`, raises an exception when critical rules are violated:
 
-## 🔍 Notebook Details
+- Required main output tables must contain records.
+- Repository keys must not have more than one active SCD2 version.
+- Active SCD2 versions must have a null `valid_to`.
 
-### 01 — Bronze Ingestion
+Errors propagate from the Databricks Job to the calling Jenkins pipeline.
 
-- Retrieves public repositories for a configurable GitHub organization (default: `databricks`).
-- Follows the API `Link: rel="next"` pagination, requesting up to 100 repositories per page.
-- Uses an explicit PySpark `StructType` schema.
-- Assigns a unique `snapshot_id` and UTC `ingestion_ts` to each acquisition.
-- Preserves source responses in `raw_json`.
-- Appends each snapshot to a managed Delta table.
+## Terraform Infrastructure as Code
 
-**Output:** `bronze_github_repositories`.
+The `terraform/` directory manages selected Databricks Unity Catalog resources and references existing catalogs/schemas with data sources. Terraform state is stored in a **GitLab HTTP remote backend**, not committed to source control.
 
-### 02 — Silver Light Staging
+Jenkins performs formatting, configuration validation, remote-state initialization, and `terraform plan`. Backend authentication and Databricks credentials are injected through Jenkins credentials.
 
-- Selects the most recent Bronze snapshot for the requested organization.
-- Projects relevant repository attributes and ingestion metadata, excluding `raw_json`.
-- Overwrites the staging table with the current snapshot.
+Terraform does **not** currently provision every resource in the Databricks workspace.
 
-**Output:** `silver_staging_github_repositories`.
+## Jenkins CI/CD and Docker
 
-### 03 — Change Detection
+The local Jenkins Controller uses a Linux inbound Agent built with `jenkins/Dockerfile`. The Agent includes Java, Python, PySpark, pytest, Terraform and Databricks CLI.
 
-- Compares the latest two Bronze snapshots by repository `id`.
-- Uses null-safe comparison (`eqNullSafe`) for `name`, `full_name`, `description`, `language`, `archived` and `default_branch`.
-- Classifies records as `NEW`, `UPDATED` or `UNCHANGED`, writing only `NEW` and `UPDATED`.
-- Treats the first available snapshot as an initial load of `NEW` records.
-- Excludes stars and forks from descriptive change detection.
+Pipeline stages include:
 
-**Output:** `silver_changes_github_repositories`.
+1. Checkout and repository verification.
+2. Verify CI tools.
+3. **PySpark unit tests with pytest**, before any deployment.
+4. Terraform formatting, validation, remote state and plan.
+5. Databricks Bundle validation for DEV, STAGING and PROD.
+6. Parameter-controlled DEV and STAGING deployment/run.
+7. **Manual approval** before PROD deployment and execution.
 
-### 04 — Silver Cleaning
+The PROD release parameters require successful STAGING deployment and execution in the same build. Deployment/run parameters default to disabled.
 
-- Normalizes selected text fields while preserving meaningful `NULL` values.
-- Checks mandatory attributes and duplicate IDs within a snapshot.
-- Loads new and updated rows incrementally, avoiding repeated `(id, snapshot_id)` combinations.
-- Retains prior Silver records when no descriptive changes are detected.
+> Jenkins runs **locally**; this repository contains its pipeline configuration, not a public Jenkins instance or a GitHub Actions workflow.
 
-**Output:** `silver_github_repositories`.
+## Testing
 
-### 05 — Gold Modeling
+`tests/` contains PySpark tests using a local `SparkSession` fixture and pytest assertions. A null-safe comparison test has been verified on the Jenkins Agent.
 
-**Repository dimension — manual SCD Type 2**
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -v tests/
+```
 
-- Generates deterministic `repository_sk` values using `SHA256(id + "_" + snapshot_id)`.
-- Tracks `valid_from`, `valid_to` and `current` for each version.
-- Compares source attributes against the current Gold version using null-safe comparisons.
-- Uses an SCD2 staging pattern: `merge_id = id` to match/close the previous version and `merge_id = NULL` to insert the new version.
-- Applies `whenMatchedUpdate()` and `whenNotMatchedInsert()` with Delta Lake `MERGE` using **`target.id = source.merge_id`**.
-- Checks required fields, duplicate surrogate keys, multiple active versions and invalid temporal intervals.
+A separate controlled SCD2 update simulation verified that a descriptive change closes an existing version and inserts a new active one, and that repeating the same update does not generate another change.
 
-**Repository metrics — snapshot history**
+**Release consideration:** if the shared Change Detection module under `src/` and its notebook import have been modified since the successful DEV/STAGING/PROD builds, validate that new revision in Jenkins and Databricks before claiming it is release-tested. Expanded scenario tests should only be listed as passed after a successful Jenkins build of that exact revision.
 
-- Stores `stargazers_count` and `forks_count` for each Bronze snapshot.
-- Uses `(organization, id, snapshot_id)` to exclude already-loaded observations.
-- Computes sequential star/fork changes through Spark windows and `lag()`.
-- Checks for missing keys, duplicates, negative metrics and timestamp/date inconsistencies.
+## Getting started
 
-**Outputs:** `gold_github_repositories`, `gold_github_repository_metrics`.
+**Prerequisites:** Databricks workspace with Unity Catalog and serverless compute, Databricks CLI, appropriate catalog permissions and authentication configuration. Local Spark tests also require Java.
 
-## 🔁 Orchestration with Databricks Asset Bundles
+For development using the project's `pyproject.toml` and lock file:
 
-`databricks.yml` includes the resources defined in `resources/*.yml` and configures the three deployment targets.
-
-`resources/github_analytics.job.yml` defines the `github_analytics_pipeline` Job, with:
-
-- Five sequential notebook tasks and explicit `depends_on` relationships.
-- Job-level parameters: `environment` (defaults to `${bundle.target}`) and `organization` (defaults to `databricks`).
-- `max_concurrent_runs: 1` to prevent overlapping Job runs.
-- Serverless notebook execution in the tested workspace.
-
-| Target | Deployment location (within workspace) | Catalog |
-|---|---|---|
-| `dev` | `ProjectOpenSourceAnalytics/dev` | `opensource_dev` |
-| `staging` | `ProjectOpenSourceAnalytics/staging` | `opensource_staging` |
-| `prod` | `ProjectOpenSourceAnalytics/prod` | `opensource_prod` |
-
-DEV uses bundle development mode. PROD is configured with production mode and explicit run identity/permissions. Deployment targets separate code locations and Jobs; the notebooks select their data catalog based on the `environment` parameter.
-
-### Prerequisites
-
-- Python **3.12** and [`uv`](https://docs.astral.sh/uv/).
-- A Databricks workspace with Serverless compute and Unity Catalog access.
-- Databricks CLI and local authentication (optionally through a named CLI profile).
-- Existing environment catalogs and a `github_analytics` schema in each target catalog.
-- Permissions to deploy Jobs and write to each catalog.
-
-### Local development with Databricks Connect
-
-Install dependencies from `pyproject.toml`:
-
-```powershell
+```bash
 uv sync
 ```
 
-When running PySpark locally from VS Code, initialize a remote Spark session:
+For Databricks Connect:
 
 ```python
 from databricks.connect import DatabricksSession
 spark = DatabricksSession.builder.serverless().getOrCreate()
 ```
 
-Notebook parameters can be supplied as Job parameters in Databricks or as environment variables for local execution:
+Validate, deploy and execute DEV:
 
-- `environment`: `dev`, `staging`, `prod` — locally via `LAKEHOUSE_ENV`.
-- `organization`: default `databricks` — locally via `GITHUB_ORGANIZATION`.
-
-### Manual bundle workflow
-
-Validate, deploy and run the desired target:
-
-```powershell
-# DEV
+```bash
 databricks bundle validate -t dev
 databricks bundle deploy -t dev
-databricks bundle run github_analytics_pipeline -t dev
-
-# STAGING
-databricks bundle validate -t staging
-databricks bundle deploy -t staging
-databricks bundle run github_analytics_pipeline -t staging
-
-# PROD — execute intentionally after verification
-databricks bundle validate -t prod
-databricks bundle deploy -t prod
-databricks bundle run github_analytics_pipeline -t prod
+databricks bundle run -t dev github_analytics_pipeline
 ```
 
-If using a named Databricks CLI profile, append `--profile YOUR_PROFILE` to these commands.
+Replace `dev` with `staging` or `prod` for each target. If using a named CLI profile, append `--profile YOUR_PROFILE`. Production runs should follow approval and environment checks.
 
-> Each new **full ingestion run** deliberately appends another Bronze snapshot and another set of Gold Metrics observations. Idempotency checks concern the absence of duplicate SCD2 versions and duplicate metric rows **for the same snapshot**, not an expectation that successive acquisitions leave Bronze unchanged.
+Every full ingestion deliberately creates another **Bronze snapshot** and additional metric observations. Idempotency refers to preventing duplicate versions or records **for a given snapshot**, not to preventing legitimate new acquisitions.
 
-## 🧪 Validation and Observed Results
+## Project structure
 
-### DEV — end-to-end validation
+```text
+open-source-analytics-lakehouse/
+├── jenkins/
+│   └── Dockerfile
+├── notebooks/
+│   ├── 01_BronzeIngestion.ipynb
+│   ├── 02_SilverLightStaging.ipynb
+│   ├── 03_ChangeDetection.ipynb
+│   ├── 04_SilverCleaning.ipynb
+│   ├── 05_GoldModeling.ipynb
+│   └── 06_DataQualityChecks.ipynb
+├── resources/
+│   └── github_analytics.job.yml
+├── terraform/
+├── tests/
+│   ├── conftest.py
+│   └── test_change_detection.py
+├── databricks.yml
+├── Jenkinsfile
+├── pyproject.toml
+├── requirements-dev.txt
+├── uv.lock
+└── README.md
+```
 
-The pipeline was run against the public `databricks` organization. Four successive acquisitions returned **253 repository records each**.
+If the Change Detection shared-module refactor has been committed, the repository also contains `src/change_detection.py` and additional tests.
 
-| Table | Observed rows after four acquisitions |
-|---|---:|
-| Bronze | 1,012 |
-| Silver Staging | 253 |
-| Silver Changes (latest comparison) | 0 |
-| Silver Clean | 253 |
-| Gold Repositories | 253 |
-| Gold Repository Metrics | 1,012 |
+## Verification status
 
-Additional checks passed:
+- **DEV:** successful six-task end-to-end execution with Data Quality Checks.
+- **STAGING:** successful deployment and six-task Job execution through Jenkins.
+- **PROD:** successful deployment and Job execution reported through Jenkins, with manual approval.
+- **CI:** PySpark null-safe comparison test passed; Terraform checks and Bundle validation passed.
+- **Security:** Gitleaks reported no leaks across 29 scanned commits during pre-publication review.
 
-- **Four of four snapshots:** 253 Bronze records, 253 unique repository IDs and 253 corresponding Gold Metrics records per snapshot (`OK`).
-- **SCD2 current-version integrity:** 253 distinct repository IDs, 253 active versions and no historical versions in the unchanged-data test.
-- **Active-version uniqueness:** no repository had multiple `current = true` versions.
-- **Temporal validity:** no invalid `valid_from` / `valid_to` / `current` combinations were found.
-- **Incremental repeat execution:** the fourth API acquisition added 253 Bronze and Gold Metrics rows, while descriptive Gold dimensions remained at 253 versions.
+These results reflect the tested revisions; subsequent code changes require fresh validation.
 
-An earlier pair of real snapshots also showed an example of **metric changes without SCD2 changes**: `databricks/app-templates` increased from 221 to 222 stars, while its fork count remained at 166.
+### Example historical validation (DEV)
 
-### Controlled CDC / SCD2 test
+After four full acquisitions of the public `databricks` organization, a previous validation recorded **253 repositories per snapshot**: 1,012 Bronze records, 253 Silver Staging records, 253 active Gold repository records, and 1,012 Gold Metrics records. The latest descriptive comparison produced zero changed repositories for that unchanged-data scenario. These are **historical observed results**, not expected fixed counts for future runs.
 
-A separate development test used `databricks/databricks-grafana-datasource` and changed its description by appending `[SCD2 TEST]` in a **separate test Delta table**, leaving the original Gold table untouched.
+## Limitations and future improvements
 
-1. The synthetic comparison classified the modified repository as `UPDATED`.
-2. The corrected `MERGE` closed the original version and inserted a new active version (two total versions: one historical, one current).
-3. Re-comparing the **same original incoming update** to the new active version returned `Changes detected: 0`.
+- Detect repositories removed from subsequent snapshots (`DELETED`).
+- Add wider unit/integration coverage of the shared Change Detection function and SCD2 merge edge cases.
+- Improve GitHub API retries, rate-limit handling, snapshot completeness checks and monitoring.
+- Consider separate Databricks workspaces for stronger environment isolation.
 
-This validates the controlled update path. A descriptive update through the **entire live API → Bronze → Gold workflow** is still a separate end-to-end test to complete.
+## Author
 
-### STAGING and PROD
-
-- **STAGING:** bundle validation, deployment and first Job run completed. The six tables were initialized with 253 rows each on the first acquisition, including 253 initial `NEW` changes.
-- **PROD:** the bundle target, deployment directory and Job were configured and verified. A completed first PROD data run and its record counts are **not yet documented here**.
-
-## 🚧 Roadmap
-
-- [x] Build Bronze, Silver and Gold Delta pipelines.
-- [x] Implement snapshot-based change detection and manual Delta Lake SCD2 logic.
-- [x] Orchestrate the five notebooks with Databricks Asset Bundles and Jobs.
-- [x] Configure DEV, STAGING and PROD deployment targets.
-- [x] Validate snapshot consistency and test a controlled SCD2 `UPDATED` case.
-- [ ] Validate the first PROD data run and record counts.
-- [ ] Implement **GitLab CI/CD** for automated validation, deployment and controlled promotion across targets.
-- [ ] Test a descriptive update end-to-end using the full pipeline.
-- [ ] Handle repositories removed from, or inaccessible in, subsequent API snapshots.
-- [ ] Improve API rate-limit handling, retries, snapshot completeness checks and recovery/idempotency safeguards.
-- [ ] Expand automated data quality tests and analytical outputs.
-- [ ] Explore Terraform for infrastructure provisioning.
-
-## 🛠️ Tech Stack
-
-**Databricks**, **Databricks Jobs**, **Declarative Automation Bundles**, **Serverless**, **PySpark**, **Delta Lake**, **Unity Catalog**, **Databricks Connect**, **Python**, **requests**, **GitHub REST API**, **uv** and **GitLab**.
-
-## 👨‍💻 Author
-
-**Raffaele Marro**  
-Data Engineer | Databricks  
+**Raffaele Marro** — Data Engineer  
 [LinkedIn](https://www.linkedin.com/in/raffaele-marro-6b1681282/)
