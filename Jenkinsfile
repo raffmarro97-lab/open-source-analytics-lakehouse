@@ -21,6 +21,12 @@ pipeline {
             defaultValue: false,
             description: 'Execute Databricks Job in DEV after deployment'
         )
+
+        booleanParam(name: 'DEPLOY_STAGING', defaultValue: false)
+        booleanParam(name: 'RUN_STAGING', defaultValue: false)
+
+        booleanParam(name: 'DEPLOY_PROD', defaultValue: false)
+        booleanParam(name: 'RUN_PROD', defaultValue: false)
     }
 
     stages {
@@ -250,6 +256,62 @@ pipeline {
                             databricks bundle run -t dev github_analytics_pipeline
 
                             echo "DEV Job execution completed!"
+                        '''
+                    }
+                }
+            }
+        }
+
+
+        stage('Deploy Databricks STAGING') {
+            when {
+                expression { params.DEPLOY_STAGING == true }
+            }
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'DATABRICKS_AUTH_TYPE=pat'
+                    ]) {
+                        sh '''
+                            set -eu
+                            echo "Deploying Databricks Bundle to STAGING..."
+                            databricks bundle deploy -t staging
+                            echo "STAGING deployment completed!"
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Run Databricks STAGING') {
+            when {
+                allOf {
+                    expression { params.DEPLOY_STAGING == true }
+                    expression { params.RUN_STAGING == true }
+                }
+            }
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'DATABRICKS_AUTH_TYPE=pat'
+                    ]) {
+                        sh '''
+                            set -eu
+                            echo "Running Databricks Job in STAGING..."
+                            databricks bundle run -t staging github_analytics_pipeline
+                            echo "STAGING Job execution completed!"
                         '''
                     }
                 }
