@@ -9,7 +9,7 @@ def spark():
         .appName("github-analytics-unit-tests")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate
+        .getOrCreate()
     )
 
     spark.sparkContext.setLogLevel("ERROR")
