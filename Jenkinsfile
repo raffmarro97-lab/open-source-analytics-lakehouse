@@ -71,6 +71,8 @@ pipeline {
                     echo "Running PySpark unit tests..."
                     python3 -m pytest -v tests/
                 '''
+            }
+
         }
 
         stage('Terraform Format') {
@@ -253,9 +255,6 @@ pipeline {
                 }
             }
         }
-        
-
-}
 
     }
 
