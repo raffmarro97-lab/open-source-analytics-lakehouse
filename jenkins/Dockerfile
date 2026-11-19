@@ -10,7 +10,10 @@ RUN apt-get update && \
     curl \
     unzip \
     git \
-    ca-certificates && \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    python3-venv && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Terraform CLI
@@ -29,5 +32,17 @@ RUN curl -fsSL \
     sh /tmp/install-databricks.sh && \
     rm /tmp/install-databricks.sh
 
-# Run agent as non-root user
+
+# Create Python virtual environment for CI tests
+RUN python3 -m venv /opt/ci-venv
+
+# Install testing dependencies
+COPY requirements-dev.txt /tmp/requirements-dev.txt
+
+RUN /opt/ci-venv/bin/pip install --no-cache-dir \
+    -r /tmp/requirements-dev.txt && \
+    rm /tmp/requirements-dev.txt
+
+ENV PATH="/opt/ci-venv/bin:${PATH}"
+
 USER jenkins
