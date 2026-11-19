@@ -318,6 +318,75 @@ pipeline {
             }
         }
 
+        stage('Approve PROD Deployment') {
+            when {
+                expression { params.DEPLOY_PROD == true }
+            }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input(
+                        message: 'STAGING completed. Approve deployment to PROD?',
+                        ok: 'Approve PROD Deployment'
+                    )
+                }
+            }
+        }
+
+        stage('Deploy Databricks PROD') {
+            when {
+                expression { params.DEPLOY_PROD == true }
+            }
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'DATABRICKS_AUTH_TYPE=pat'
+                    ]) {
+                        sh '''
+                            set -eu
+                            echo "Deploying Databricks Bundle to PROD..."
+                            databricks bundle deploy -t prod
+                            echo "PROD deployment completed!"
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Run Databricks PROD') {
+            when {
+                allOf {
+                    expression { params.DEPLOY_PROD == true }
+                    expression { params.RUN_PROD == true }
+                }
+            }
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'databricks-ci-token',
+                        variable: 'DATABRICKS_TOKEN'
+                    )
+                ]) {
+                    withEnv([
+                        'DATABRICKS_HOST=https://dbc-ffab9e1e-aa5d.cloud.databricks.com',
+                        'DATABRICKS_AUTH_TYPE=pat'
+                    ]) {
+                        sh '''
+                            set -eu
+                            echo "Running Databricks Job in PROD..."
+                            databricks bundle run -t prod github_analytics_pipeline
+                            echo "PROD Job execution completed!"
+                        '''
+                    }
+                }
+            }
+        }
+
     }
 
     post {
