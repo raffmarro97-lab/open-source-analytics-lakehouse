@@ -33,3 +33,28 @@ typings/
 *.tfbackend
 crash.log
 crash.*.log
+
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environment variables and credentials
+.env
+.env.*
+!.env.example
+.databrickscfg
+*.pem
+*.key
+
+# Databricks local files
+.databricks/
+
+# Local development
+.vscode/
+.idea/
+.DS_Store
